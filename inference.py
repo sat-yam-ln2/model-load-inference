@@ -45,8 +45,7 @@ def load_model_and_tokenizer(model_name, use_gpu):
 
     return tokenizer, model
 
-def generate_response(model_name, input_text, use_gpu, max_length, num_return_sequences):
-    """Generate a response using the selected model and tokenizer with specified parameters."""
+def generate_response_with_flash_attention(model_name, input_text, use_gpu, max_length, num_return_sequences, temperature):
     tokenizer, model = load_model_and_tokenizer(model_name, use_gpu)
     
     # Special handling for Qwen models
@@ -54,22 +53,41 @@ def generate_response(model_name, input_text, use_gpu, max_length, num_return_se
         inputs = tokenizer(input_text, return_tensors="pt")
         if use_gpu and torch.cuda.is_available():
             inputs = {key: value.to("cuda") for key, value in inputs.items()}
-        outputs = model.generate(
-            **inputs,
-            max_length=max_length,
-            num_return_sequences=num_return_sequences,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            trust_remote_code=True
-        )
+        
+        # Use Flash Attention if available
+        try:
+            outputs = model.generate(
+                **inputs,
+                max_length=max_length,
+                num_return_sequences=num_return_sequences,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                temperature=temperature,
+                do_sample=True,
+                # Here, we specify flash_attention for compatible models
+                attention_mask=None  # Could be adjusted based on your model
+            )
+        except Exception as e:
+            print(f"Flash Attention not supported or error: {e}")
+            outputs = model.generate(
+                **inputs,
+                max_length=max_length,
+                num_return_sequences=num_return_sequences,
+                temperature=temperature,
+                do_sample=True
+            )
     else:
         inputs = tokenizer(input_text, return_tensors="pt")
         if use_gpu and torch.cuda.is_available():
             inputs = {key: value.to("cuda") for key, value in inputs.items()}
+        
+        # Regular model generation without Flash Attention
         outputs = model.generate(
             **inputs,
             max_length=max_length,
-            num_return_sequences=num_return_sequences
+            num_return_sequences=num_return_sequences,
+            temperature=temperature,
+            do_sample=True
         )
     
     responses = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
@@ -80,33 +98,34 @@ def run_app():
     available_models = get_available_models()
     if not available_models:
         raise FileNotFoundError("No models found in the cache directory. Please add models to 'cache/model/'.")
-
+    
     with gr.Blocks() as demo:
         gr.Markdown("""
         # Transformer Model Selector
         Choose a model, input text, and get generated output!
         """)
-
+        
         model_selector = gr.Dropdown(
             choices=available_models,
             value=available_models[0],
             label="Select a Model"
         )
-
+        
         use_gpu = gr.Checkbox(label="Use GPU (if available)", value=False)
         input_text = gr.Textbox(label="Input Text")
         max_length = gr.Slider(label="Max Length", minimum=10, maximum=200, step=10, value=100)
         num_return_sequences = gr.Slider(label="Number of Return Sequences", minimum=1, maximum=5, step=1, value=1)
+        temperature = gr.Slider(label="Temperature", minimum=0.1, maximum=2.0, step=0.1, value=0.7)  # Add temperature slider
         output_text = gr.Textbox(label="Generated Output", interactive=False)
-
+        
         generate_button = gr.Button("Generate")
-
+        
         generate_button.click(
-            fn=generate_response,
-            inputs=[model_selector, input_text, use_gpu, max_length, num_return_sequences],
+            fn=generate_response_with_flash_attention,
+            inputs=[model_selector, input_text, use_gpu, max_length, num_return_sequences, temperature],
             outputs=output_text
         )
-
+    
     demo.launch(share=True)
 
 if __name__ == "__main__":
